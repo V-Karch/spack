@@ -4,13 +4,14 @@
 
 import collections
 import datetime
+import email.message
 import errno
 import functools
 import inspect
+import io
 import itertools
 import json
 import os
-import os.path
 import pathlib
 import re
 import shutil
@@ -36,6 +37,7 @@ import spack.bootstrap.core
 import spack.caches
 import spack.compiler
 import spack.compilers
+import spack.concretize
 import spack.config
 import spack.directives_meta
 import spack.environment as ev
@@ -63,6 +65,8 @@ from spack.fetch_strategy import URLFetchStrategy
 from spack.installer import PackageInstaller
 from spack.main import SpackCommand
 from spack.util.pattern import Bunch
+
+from ..enums import ConfigScopePriority
 
 mirror_cmd = SpackCommand("mirror")
 
@@ -335,6 +339,16 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if any(x in item.keywords for x in slow_tests):
             item.add_marker(skip_as_slow)
+
+
+@pytest.fixture(scope="function")
+def use_concretization_cache(mutable_config, tmpdir):
+    """Enables the use of the concretization cache"""
+    spack.config.set("config:concretization_cache:enable", True)
+    # ensure we have an isolated concretization cache
+    new_conc_cache_loc = str(tmpdir.mkdir("concretization"))
+    spack.config.set("config:concretization_cache:path", new_conc_cache_loc)
+    yield
 
 
 #
@@ -619,7 +633,7 @@ def linux_os():
     platform = spack.platforms.host()
     name, version = "debian", "6"
     if platform.name == "linux":
-        current_os = platform.operating_system("default_os")
+        current_os = platform.default_operating_system()
         name, version = current_os.name, current_os.version
     LinuxOS = collections.namedtuple("LinuxOS", ["name", "version"])
     return LinuxOS(name=name, version=version)
@@ -678,7 +692,6 @@ def mock_uarch_configuration(mock_uarch_json):
 def mock_targets(mock_uarch_configuration, monkeypatch):
     """Use this fixture to enable mock uarch targets for testing."""
     targets_json, targets = mock_uarch_configuration
-
     monkeypatch.setattr(archspec.cpu.schema, "TARGETS_JSON", targets_json)
     monkeypatch.setattr(archspec.cpu.microarchitecture, "TARGETS", targets)
 
@@ -722,11 +735,23 @@ def configuration_dir(tmpdir_factory, linux_os):
 def _create_mock_configuration_scopes(configuration_dir):
     """Create the configuration scopes used in `config` and `mutable_config`."""
     return [
-        spack.config.InternalConfigScope("_builtin", spack.config.CONFIG_DEFAULTS),
-        spack.config.DirectoryConfigScope("site", str(configuration_dir.join("site"))),
-        spack.config.DirectoryConfigScope("system", str(configuration_dir.join("system"))),
-        spack.config.DirectoryConfigScope("user", str(configuration_dir.join("user"))),
-        spack.config.InternalConfigScope("command_line"),
+        (
+            ConfigScopePriority.BUILTIN,
+            spack.config.InternalConfigScope("_builtin", spack.config.CONFIG_DEFAULTS),
+        ),
+        (
+            ConfigScopePriority.CONFIG_FILES,
+            spack.config.DirectoryConfigScope("site", str(configuration_dir.join("site"))),
+        ),
+        (
+            ConfigScopePriority.CONFIG_FILES,
+            spack.config.DirectoryConfigScope("system", str(configuration_dir.join("system"))),
+        ),
+        (
+            ConfigScopePriority.CONFIG_FILES,
+            spack.config.DirectoryConfigScope("user", str(configuration_dir.join("user"))),
+        ),
+        (ConfigScopePriority.COMMAND_LINE, spack.config.InternalConfigScope("command_line")),
     ]
 
 
@@ -793,13 +818,11 @@ def mock_wsdk_externals(monkeypatch_session):
 def concretize_scope(mutable_config, tmpdir):
     """Adds a scope for concretization preferences"""
     tmpdir.ensure_dir("concretize")
-    mutable_config.push_scope(
+    with spack.config.override(
         spack.config.DirectoryConfigScope("concretize", str(tmpdir.join("concretize")))
-    )
+    ):
+        yield str(tmpdir.join("concretize"))
 
-    yield str(tmpdir.join("concretize"))
-
-    mutable_config.pop_scope()
     spack.repo.PATH._provider_index = None
 
 
@@ -849,7 +872,7 @@ def _populate(mock_db):
     """
 
     def _install(spec):
-        s = spack.spec.Spec(spec).concretized()
+        s = spack.concretize.concretize_one(spec)
         PackageInstaller([s.package], fake=True, explicit=True).install()
 
     _install("mpileaks ^mpich")
@@ -887,20 +910,25 @@ def mock_store(
     """
     store_path, store_cache = _store_dir_and_cache
 
+    # Make the DB filesystem read-only to ensure constructors don't modify anything in it.
+    # We want Spack to be able to point to a DB on a read-only filesystem easily.
+    store_path.chmod(mode=0o555, rec=1)
+
     # If the cache does not exist populate the store and create it
     if not os.path.exists(str(store_cache.join(".spack-db"))):
         with spack.config.use_configuration(*mock_configuration_scopes):
             with spack.store.use_store(str(store_path)) as store:
                 with spack.repo.use_repositories(mock_repo_path):
+                    # make the DB filesystem writable only while we populate it
+                    store_path.chmod(mode=0o755, rec=1)
                     _populate(store.db)
-        copy_tree(str(store_path), str(store_cache))
+                    store_path.chmod(mode=0o555, rec=1)
 
-    # Make the DB filesystem read-only to ensure we can't modify entries
-    store_path.join(".spack-db").chmod(mode=0o555, rec=1)
+        store_cache.chmod(mode=0o755, rec=1)
+        copy_tree(str(store_path), str(store_cache))
+        store_cache.chmod(mode=0o555, rec=1)
 
     yield store_path
-
-    store_path.join(".spack-db").chmod(mode=0o755, rec=1)
 
 
 @pytest.fixture(scope="function")
@@ -927,7 +955,7 @@ def mutable_database(database_mutable_config, _store_dir_and_cache):
     """
     # Make the database writeable, as we are going to modify it
     store_path, store_cache = _store_dir_and_cache
-    store_path.join(".spack-db").chmod(mode=0o755, rec=1)
+    store_path.chmod(mode=0o755, rec=1)
 
     yield database_mutable_config
 
@@ -935,7 +963,7 @@ def mutable_database(database_mutable_config, _store_dir_and_cache):
     # the store and making the database read-only
     store_path.remove(rec=1)
     copy_tree(str(store_cache), str(store_path))
-    store_path.join(".spack-db").chmod(mode=0o555, rec=1)
+    store_path.chmod(mode=0o555, rec=1)
 
 
 @pytest.fixture()
@@ -1039,7 +1067,8 @@ def temporary_store(tmpdir, request):
     temporary_store_path = tmpdir.join("opt")
     with spack.store.use_store(str(temporary_store_path)) as s:
         yield s
-    temporary_store_path.remove()
+    if temporary_store_path.exists():
+        temporary_store_path.remove()
 
 
 @pytest.fixture()
@@ -1977,7 +2006,9 @@ def default_mock_concretization(config, mock_packages, concretized_specs_cache):
     def _func(spec_str, tests=False):
         key = spec_str, tests
         if key not in concretized_specs_cache:
-            concretized_specs_cache[key] = spack.spec.Spec(spec_str).concretized(tests=tests)
+            concretized_specs_cache[key] = spack.concretize.concretize_one(
+                spack.spec.Spec(spec_str), tests=tests
+            )
         return concretized_specs_cache[key].copy()
 
     return _func
@@ -2118,4 +2149,52 @@ def _c_compiler_always_exists():
 def mock_test_cache(tmp_path_factory):
     cache_dir = tmp_path_factory.mktemp("cache")
     print(cache_dir)
-    return spack.util.file_cache.FileCache(str(cache_dir))
+    return spack.util.file_cache.FileCache(cache_dir)
+
+
+class MockHTTPResponse(io.IOBase):
+    """This is a mock HTTP response, which implements part of http.client.HTTPResponse"""
+
+    def __init__(self, status, reason, headers=None, body=None):
+        self.msg = None
+        self.version = 11
+        self.url = None
+        self.headers = email.message.EmailMessage()
+        self.status = status
+        self.code = status
+        self.reason = reason
+        self.debuglevel = 0
+        self._body = body
+
+        if headers is not None:
+            for key, value in headers.items():
+                self.headers[key] = value
+
+    @classmethod
+    def with_json(cls, status, reason, headers=None, body=None):
+        """Create a mock HTTP response with JSON string as body"""
+        body = io.BytesIO(json.dumps(body).encode("utf-8"))
+        return cls(status, reason, headers, body)
+
+    def read(self, *args, **kwargs):
+        return self._body.read(*args, **kwargs)
+
+    def getheader(self, name, default=None):
+        self.headers.get(name, default)
+
+    def getheaders(self):
+        return self.headers.items()
+
+    def fileno(self):
+        return 0
+
+    def getcode(self):
+        return self.status
+
+    def info(self):
+        return self.headers
+
+
+@pytest.fixture()
+def mock_runtimes(config, mock_packages):
+    return mock_packages.packages_with_tags("runtime")
