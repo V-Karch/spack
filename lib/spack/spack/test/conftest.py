@@ -259,9 +259,9 @@ def mock_git_package_changes(git, tmpdir, override_git_repos_cache_path, monkeyp
     Important attributes of the repo for test coverage are: multiple package
     versions are added with some coming from a tarball and some from git refs.
     """
-    filename = "diff-test/package.py"
+    filename = "diff_test/package.py"
 
-    repo_path, _ = spack.repo.create_repo(str(tmpdir.mkdir("myrepo")))
+    repo_path, _ = spack.repo.create_repo(str(tmpdir), namespace="myrepo")
     repo_cache = spack.util.file_cache.FileCache(str(tmpdir.mkdir("cache")))
 
     repo = spack.repo.Repo(repo_path, cache=repo_cache)
@@ -887,6 +887,7 @@ def no_packages_yaml(mutable_config):
         compilers_yaml = local_config.get_section_filename("packages")
         if os.path.exists(compilers_yaml):
             os.remove(compilers_yaml)
+    mutable_config.clear_caches()
     return mutable_config
 
 
@@ -1068,9 +1069,7 @@ def install_mockery(temporary_store: spack.store.Store, mutable_config, mock_pac
 @pytest.fixture(scope="module")
 def temporary_mirror_dir(tmpdir_factory):
     dir = tmpdir_factory.mktemp("mirror")
-    dir.ensure("build_cache", dir=True)
     yield str(dir)
-    dir.join("build_cache").remove()
 
 
 @pytest.fixture(scope="function")
@@ -1084,9 +1083,7 @@ def temporary_mirror(temporary_mirror_dir):
 @pytest.fixture(scope="function")
 def mutable_temporary_mirror_dir(tmpdir_factory):
     dir = tmpdir_factory.mktemp("mirror")
-    dir.ensure("build_cache", dir=True)
     yield str(dir)
-    dir.join("build_cache").remove()
 
 
 @pytest.fixture(scope="function")
@@ -2075,6 +2072,11 @@ def pytest_runtest_setup(item):
     only_windows_marker = item.get_closest_marker(name="only_windows")
     if only_windows_marker and sys.platform != "win32":
         pytest.skip(*only_windows_marker.args)
+
+    # Skip tests marked "requires_builtin" if builtin repo is required
+    requires_builtin_marker = item.get_closest_marker(name="requires_builtin")
+    if requires_builtin_marker and not os.path.exists(spack.paths.packages_path):
+        pytest.skip(*requires_builtin_marker.args)
 
 
 def _sequential_executor(*args, **kwargs):
