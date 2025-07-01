@@ -549,11 +549,10 @@ def test_url_buildcache_entry_v2_exists(
 ):
     """Test existence check for v2 buildcache entries"""
     test_mirror_path = v2_buildcache_layout("unsigned")
-    mirror_url = f"file://{test_mirror_path}"
+    mirror_url = pathlib.Path(test_mirror_path).as_uri()
     mirror("add", "v2mirror", mirror_url)
 
-    with capsys.disabled():
-        output = buildcache("list", "-a", "-l")
+    output = buildcache("list", "-a", "-l")
 
     assert "Fetching an index from a v2 binary mirror layout" in output
     assert "is deprecated" in output
@@ -612,7 +611,8 @@ def test_install_v2_layout(
     assert "Extracting libdwarf" in output
     assert "libdwarf: Successfully installed" in output
     assert "Installing a spec from a v2 binary mirror layout" in output
-    assert "is deprecated" in output
+    assert "Fetching an index from a v2 binary mirror layout" in output
+    assert "deprecated" in output
 
 
 def test_basic_migrate_unsigned(capsys, v2_buildcache_layout, mutable_config):

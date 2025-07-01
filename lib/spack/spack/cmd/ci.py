@@ -2,6 +2,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
+import argparse
 import json
 import os
 import shutil
@@ -54,8 +55,8 @@ def unicode_escape(path: str) -> str:
     return path.encode("unicode-escape").decode("utf-8")
 
 
-def setup_parser(subparser):
-    setup_parser.parser = subparser
+def setup_parser(subparser: argparse.ArgumentParser) -> None:
+    setattr(setup_parser, "parser", subparser)
     subparsers = subparser.add_subparsers(help="CI sub-commands")
 
     # Dynamic generation of the jobs yaml from a spack environment
@@ -84,6 +85,23 @@ def setup_parser(subparser):
         "--no-prune-dag",
         action="store_false",
         dest="prune_dag",
+        default=True,
+        help="process up-to-date specs\n\n"
+        "generate jobs for specs even when they are up-to-date on the mirror",
+    )
+    prune_unaffected_group = generate.add_mutually_exclusive_group()
+    prune_unaffected_group.add_argument(
+        "--prune-unaffected",
+        action="store_true",
+        dest="prune_unaffected",
+        default=True,
+        help="skip up-to-date specs\n\n"
+        "do not generate jobs for specs that are up-to-date on the mirror",
+    )
+    prune_unaffected_group.add_argument(
+        "--no-prune-unaffected",
+        action="store_false",
+        dest="prune_unaffected",
         default=True,
         help="process up-to-date specs\n\n"
         "generate jobs for specs even when they are up-to-date on the mirror",

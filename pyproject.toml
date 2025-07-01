@@ -75,7 +75,6 @@ section-order = [
   "future",
   "standard-library",
   "third-party",
-  "archspec",
   "llnl",
   "spack",
   "first-party",
@@ -84,7 +83,6 @@ section-order = [
 
 [tool.ruff.lint.isort.sections]
 spack = ["spack"]
-archspec = ["archspec"]
 llnl = ["llnl"]
 
 [tool.ruff.lint.per-file-ignores]
@@ -93,7 +91,7 @@ llnl = ["llnl"]
 
 [tool.black]
 line-length = 99
-include = "(lib/spack|var/spack/repos|var/spack/test_repos)/.*\\.pyi?$|bin/spack$"
+include = "(lib/spack|var/spack/test_repos)/.*\\.pyi?$|bin/spack$"
 extend-exclude = "lib/spack/external"
 skip_magic_trailing_comma = true
 
@@ -104,13 +102,11 @@ sections = [
   "FUTURE",
   "STDLIB",
   "THIRDPARTY",
-  "ARCHSPEC",
   "LLNL",
   "FIRSTPARTY",
   "LOCALFOLDER",
 ]
 known_first_party = "spack"
-known_archspec = "archspec"
 known_llnl = "llnl"
 known_third_party = ["ruamel", "six"]
 src_paths = "lib"
@@ -120,9 +116,8 @@ honor_noqa = true
 files = [
   "lib/spack/llnl/**/*.py",
   "lib/spack/spack/**/*.py",
-  "var/spack/repos/spack_repo/builtin/packages/*/package.py",
 ]
-mypy_path = ["lib/spack", "lib/spack/external", "var/spack/repos"]
+mypy_path = ["lib/spack", "lib/spack/external"]
 allow_redefinition = true
 
 # This and a generated import file allows supporting packages
@@ -192,7 +187,7 @@ follow_imports_for_stubs = true
 useLibraryCodeForTypes = true
 reportMissingImports = true
 reportWildcardImportFromLibrary = false
-include = ["lib/spack", "var/spack/repos", "var/spack/test_repos"]
+include = ["lib/spack", "var/spack/test_repos"]
 ignore = ["lib/spack/external"]
 extraPaths = ["lib/spack", "lib/spack/external"]
 
@@ -285,11 +280,21 @@ drop = [
   "pvectorc.*.so",
   # Trim jsonschema tests
   "jsonschema/tests",
+  "archspec/json/tests",
+  "archspec/vendor/cpuid/.gitignore",
+  "pyrsistent/__init__.pyi",
 ]
 
 [tool.vendoring.typing-stubs]
-six = ["six.__init__", "six.moves.__init__", "six.moves.configparser"]
+_pyrsistent_version = []
+altgraph = []
+archspec = []
 distro = []
+jsonschema = []
+macholib = []
+pyrsistent = []
+ruamel = []
+six = []
 
 [tool.vendoring.license.directories]
 setuptools = "pkg_resources"

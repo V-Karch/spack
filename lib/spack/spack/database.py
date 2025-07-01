@@ -21,7 +21,6 @@ import contextlib
 import datetime
 import os
 import pathlib
-import socket
 import sys
 import time
 from json import JSONDecoder
@@ -53,7 +52,6 @@ except ImportError:
     pass
 
 import llnl.util.filesystem as fs
-import llnl.util.lang
 import llnl.util.tty as tty
 
 import spack.deptypes as dt
@@ -70,6 +68,7 @@ from spack.directory_layout import (
 )
 from spack.error import SpackError
 from spack.util.crypto import bit_length
+from spack.util.socket import _getfqdn
 
 from .enums import InstallRecordStatus
 
@@ -136,17 +135,6 @@ _INDEX_VERIFIER_FILE = "index_verifier"
 
 # Lockfile for the database
 _LOCK_FILE = "lock"
-
-
-@llnl.util.lang.memoized
-def _getfqdn():
-    """Memoized version of `getfqdn()`.
-
-    If we call `getfqdn()` too many times, DNS can be very slow. We only need to call it
-    one time per process, so we cache it here.
-
-    """
-    return socket.getfqdn()
 
 
 def reader(version: vn.StandardVersion) -> Type["spack.spec.SpecfileReaderBase"]:
@@ -739,8 +727,13 @@ class Database:
 
         Return:
             (tuple): (bool, optional InstallRecord): bool tells us whether
-                the spec is installed upstream. Its InstallRecord is also
-                returned if it's installed at all; otherwise None.
+                the record is from an upstream. Its InstallRecord is also
+                returned if available (the record must be checked to know
+                whether the hash is installed).
+
+        If the record is available locally, this function will always have
+        a preference for returning that, even if it is not installed locally
+        and is installed upstream.
         """
         if data and hash_key in data:
             return False, data[hash_key]
@@ -778,7 +771,7 @@ class Database:
             spec_node_dict = spec_node_dict[spec.name]
         if "dependencies" in spec_node_dict:
             yaml_deps = spec_node_dict["dependencies"]
-            for dname, dhash, dtypes, _, virtuals in spec_reader.read_specfile_dep_specs(
+            for dname, dhash, dtypes, _, virtuals, direct in spec_reader.read_specfile_dep_specs(
                 yaml_deps
             ):
                 # It is important that we always check upstream installations in the same order,
@@ -797,7 +790,9 @@ class Database:
                     )
                     continue
 
-                spec._add_dependency(child, depflag=dt.canonicalize(dtypes), virtuals=virtuals)
+                spec._add_dependency(
+                    child, depflag=dt.canonicalize(dtypes), virtuals=virtuals, direct=direct
+                )
 
     def _read_from_file(self, filename: pathlib.Path, *, reindex: bool = False) -> None:
         """Fill database from file, do not maintain old data.
@@ -805,11 +800,14 @@ class Database:
 
         Does not do any locking.
         """
+        if not filename.is_file():
+            raise FileNotFoundError(f"database does not exist {filename}")
+
         try:
             # In the future we may use a stream of JSON objects, hence `raw_decode` for compat.
             fdata, _ = JSONDecoder().raw_decode(filename.read_text(encoding="utf-8"))
         except Exception as e:
-            raise CorruptDatabaseError("error parsing database:", str(e)) from e
+            raise CorruptDatabaseError(f"error parsing database at {filename}:", str(e)) from e
 
         if fdata is None:
             return
@@ -914,11 +912,22 @@ class Database:
         raise ExplicitDatabaseUpgradeError(
             f"database is v{self.db_version}, but Spack v{spack.__version__} needs v{_DB_VERSION}",
             long_message=(
-                f"\nChange config:install_tree:root to use a different store, or use `spack "
-                f"reindex` to migrate the store at {self.root} to version {_DB_VERSION}.\n\n"
-                f"If you decide to migrate the store, note that:\n"
-                f"1. The operation cannot be reverted, and\n"
-                f"2. Older Spack versions will not be able to read the store anymore\n"
+                f"You will need to either:"
+                f"\n"
+                f"\n  1. Migrate the database to v{_DB_VERSION}, or"
+                f"\n  2. Use a new database by changing config:install_tree:root."
+                f"\n"
+                f"\nTo migrate the database at {self.root} "
+                f"\nto version {_DB_VERSION}, run:"
+                f"\n"
+                f"\n    spack reindex"
+                f"\n"
+                f"\nNOTE that if you do this, older Spack versions will no longer"
+                f"\nbe able to read the database. However, `spack reindex` will create a backup,"
+                f"\nin case you want to revert."
+                f"\n"
+                f"\nIf you still need your old database, you can instead run"
+                f"\n`spack config edit config` and set install_tree:root to a new location."
             ),
         )
 
@@ -1171,7 +1180,7 @@ class Database:
         key = spec.dag_hash()
         spec_pkg_hash = spec._package_hash  # type: ignore[attr-defined]
         upstream, record = self.query_by_spec_hash(key)
-        if upstream:
+        if upstream and record and record.installed:
             return
 
         installation_time = installation_time or _now()
@@ -1260,7 +1269,7 @@ class Database:
     def _get_matching_spec_key(self, spec: "spack.spec.Spec", **kwargs) -> str:
         """Get the exact spec OR get a single spec that matches."""
         key = spec.dag_hash()
-        upstream, record = self.query_by_spec_hash(key)
+        _, record = self.query_by_spec_hash(key)
         if not record:
             match = self.query_one(spec, **kwargs)
             if match:
@@ -1271,7 +1280,7 @@ class Database:
     @_autospec
     def get_record(self, spec: "spack.spec.Spec", **kwargs) -> Optional[InstallRecord]:
         key = self._get_matching_spec_key(spec, **kwargs)
-        upstream, record = self.query_by_spec_hash(key)
+        _, record = self.query_by_spec_hash(key)
         return record
 
     def _decrement_ref_count(self, spec: "spack.spec.Spec") -> None:
@@ -1779,7 +1788,7 @@ class Database:
 
     def missing(self, spec):
         key = spec.dag_hash()
-        upstream, record = self.query_by_spec_hash(key)
+        _, record = self.query_by_spec_hash(key)
         return record and not record.installed
 
     def is_occupied_install_prefix(self, path):
